@@ -187,6 +187,10 @@ This codebase builds on a number of excellent open-source projects:
 - [**PUMA**](https://github.com/JaeyeonKim01/PUMA): reference for the TinyGSM data preparation.
 - [**PRISM**](https://github.com/JaeyeonKim01/PRISM): reference for the Sudoku data preparation.
 
+# License
+
+This codebase is distributed under apache-2 license.
+
 # Citation
 
 ```
