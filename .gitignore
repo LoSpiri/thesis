@@ -177,3 +177,10 @@ checkpoints/
 multirun/
 .hydra/
 .nfs*
+
+# E1 experiment artifacts
+e1/results/
+e1/*.log
+e1/*.nohup.log
+e1/REPORT.md
+e1/__pycache__/

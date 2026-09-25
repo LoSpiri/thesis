@@ -2,8 +2,6 @@ import math
 import typing
 
 import einops
-import flash_attn
-import flash_attn.layers.rotary
 import huggingface_hub
 import omegaconf
 import torch
@@ -49,7 +47,6 @@ def modulate(x: torch.Tensor,
   return x * (1 + scale) + shift
 
 
-@torch.jit.script
 def bias_dropout_add_scale_fused_train(
     x: torch.Tensor,
     bias: typing.Optional[torch.Tensor],
@@ -60,7 +57,6 @@ def bias_dropout_add_scale_fused_train(
     x, bias, scale, residual, prob, True)
 
 
-@torch.jit.script
 def bias_dropout_add_scale_fused_inference(
     x: torch.Tensor,
     bias: typing.Optional[torch.Tensor],
@@ -71,7 +67,6 @@ def bias_dropout_add_scale_fused_inference(
     x, bias, scale, residual, prob, False)
 
 
-@torch.jit.script
 def modulate_fused(x: torch.Tensor,
                    shift: torch.Tensor,
                    scale: torch.Tensor) -> torch.Tensor:
@@ -116,6 +111,23 @@ def rotate_half(x):
   return torch.cat((-x2, x1), dim=-1)
 
 
+def _rotary_rotate(x, cos, sin):
+  """Pure-torch GPT-NeoX style (split halves) rotary embedding.
+
+  x: (batch, seqlen, nheads, headdim)
+  cos, sin: (seqlen, headdim // 2) or (batch, seqlen, headdim // 2)
+  Matches flash_attn.layers.rotary.apply_rotary_emb_torch with
+  interleaved=False.
+  """
+  d = cos.shape[-1]
+  cos = cos[..., None, :]  # add a singleton head dim for broadcasting
+  sin = sin[..., None, :]
+  x1 = x[..., :d]
+  x2 = x[..., d:2 * d]
+  out = torch.cat([x1 * cos - x2 * sin, x2 * cos + x1 * sin], dim=-1)
+  return torch.cat([out, x[..., 2 * d:]], dim=-1)
+
+
 def split_and_apply_rotary_pos_emb(qkv, rotary_cos_sin):
   with torch.amp.autocast('cuda', enabled=False):
     cos, sin = rotary_cos_sin
@@ -124,18 +136,19 @@ def split_and_apply_rotary_pos_emb(qkv, rotary_cos_sin):
     cos = cos[0,:,0,0,:cos.shape[-1]//2]
     sin = sin[0,:,0,0,:sin.shape[-1]//2]
     q, k, v = qkv.chunk(3, dim=2)
-    q = flash_attn.layers.rotary.apply_rotary_emb_torch(
-      q.squeeze(dim=2), cos, sin)
-    k = flash_attn.layers.rotary.apply_rotary_emb_torch(
-      k.squeeze(dim=2), cos, sin)
+    q = _rotary_rotate(q.squeeze(dim=2), cos, sin)
+    k = _rotary_rotate(k.squeeze(dim=2), cos, sin)
     v = v.squeeze(dim=2)
   return q, k, v
 
 
 def apply_rotary_pos_emb(qkv, cos, sin):
-  cos = cos[0,:,0,0,:cos.shape[-1]//2]
-  sin = sin[0,:,0,0,:sin.shape[-1]//2]
-  return flash_attn.layers.rotary.apply_rotary_emb_qkv_(qkv, cos, sin)
+  cos = cos[0,:,0,0,:cos.shape[-1]//2].to(qkv.dtype)
+  sin = sin[0,:,0,0,:sin.shape[-1]//2].to(qkv.dtype)
+  out = qkv.clone()
+  out[:, :, 0] = _rotary_rotate(qkv[:, :, 0], cos, sin)
+  out[:, :, 1] = _rotary_rotate(qkv[:, :, 1], cos, sin)
+  return out
 
 
 def regular_attention_multi_headed(q, k, v):
@@ -156,6 +169,24 @@ def regular_attention_multi_headed(q, k, v):
 def _sdpa_full(q, k, v):
   """Non-causal full-sequence attention. q/k/v: [B, H, S, D]."""
   return F.scaled_dot_product_attention(q, k, v)
+
+
+def _sdpa_causal(q, k, v):
+  """Causal attention. q/k/v: [B, H, S, D]."""
+  return F.scaled_dot_product_attention(q, k, v, is_causal=True)
+
+
+def _sdpa_softcap(q, k, v, softcap):
+  """Non-causal attention with softcapping. q/k/v: [B, H, S, D].
+
+  Equivalent to flash_attn.flash_attn_qkvpacked_func(..., softcap=c):
+    attn = softmax(c * tanh(logits / c)), logits = q @ k^T / sqrt(d).
+  """
+  scale = q.shape[-1] ** -0.5
+  logits = torch.matmul(q, k.transpose(-2, -1)) * scale
+  logits = softcap * torch.tanh(logits / softcap)
+  attn = torch.softmax(logits, dim=-1)
+  return torch.matmul(attn, v)
 
 
 #################################################################################
@@ -309,11 +340,15 @@ class DDiTBlockCausal(nn.Module):
     if kv_cache:
       k_full = k if self.k_cache is None else torch.cat([self.k_cache, k], dim=1)
       v_full = v if self.v_cache is None else torch.cat([self.v_cache, v], dim=1)
-      x = flash_attn.flash_attn_func(q, k_full, v_full, causal=True)
+      x = _sdpa_causal(
+        q.transpose(1, 2), k_full.transpose(1, 2), v_full.transpose(1, 2))
+      x = x.transpose(1, 2)
       self.k_cache = k.detach() if self.k_cache is None else torch.cat([self.k_cache, k.detach()], dim=1)
       self.v_cache = v.detach() if self.v_cache is None else torch.cat([self.v_cache, v.detach()], dim=1)
     else:
-      x = flash_attn.flash_attn_func(q, k, v, causal=True)
+      x = _sdpa_causal(
+        q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2))
+      x = x.transpose(1, 2)
     x = einops.rearrange(x, 'b s h d -> b s (h d)')
 
     if self.adaLN:
@@ -376,9 +411,10 @@ class DDiTBlock(nn.Module):
   def _attn(self, qkv: torch.Tensor, attn_kernel) -> torch.Tensor:
     """Standard full-sequence attention. qkv: [B, S, 3, H, D]"""
     if self.softcap > 0 and attn_kernel is _sdpa_full:
-      x = flash_attn.flash_attn_qkvpacked_func(
-        qkv, 0.0, causal=False, softcap=self.softcap)
-      return einops.rearrange(x, 'b s h d -> b s (h d)')
+      qkv = einops.rearrange(qkv, 'b s three h d -> b h three s d')
+      x = _sdpa_softcap(
+        qkv[:, :, 0], qkv[:, :, 1], qkv[:, :, 2], self.softcap)
+      return einops.rearrange(x, 'b h s d -> b s (h d)')
     qkv = einops.rearrange(qkv, 'b s three h d -> b h three s d')
     x = attn_kernel(qkv[:, :, 0], qkv[:, :, 1], qkv[:, :, 2])
     return einops.rearrange(x, 'b h s d -> b s (h d)')
@@ -550,7 +586,7 @@ class DIT(nn.Module, huggingface_hub.PyTorchModelHubMixin):
         device=x.device)
     else:
       rotary_cos_sin = self.rotary_emb(x)
-    with torch.amp.autocast('cuda', dtype=torch.bfloat16):
+    with torch.amp.autocast(device_type=x.device.type, dtype=torch.bfloat16):
       for i in range(len(self.blocks)):
         x = self.blocks[i](x, rotary_cos_sin, c=t_cond, kv_cache=kv_cache)
       x = self.output_layer(x, c=t_cond)

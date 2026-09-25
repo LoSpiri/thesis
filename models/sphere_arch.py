@@ -367,7 +367,7 @@ class SphereArch(nn.Module, huggingface_hub.PyTorchModelHubMixin):
 
     rotary_cos_sin = self.rotary_emb(x)
 
-    with torch.amp.autocast('cuda', dtype=torch.bfloat16):
+    with torch.amp.autocast(device_type=x.device.type, dtype=torch.bfloat16):
       for block in self.blocks:
         x = block(x, rotary_cos_sin, t_emb)
       if self.use_time_token:

@@ -13,8 +13,6 @@ Key difference from models/dit.py DIT:
 import math
 
 import einops
-import flash_attn
-import flash_attn.layers.rotary
 import omegaconf
 import torch
 import torch.nn as nn

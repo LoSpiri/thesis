@@ -67,7 +67,7 @@ def sample_absorbing_posterior(x0_probs, xt, alpha_s, alpha_t,
   else:
     denoise_prob = (alpha_s - alpha_t) / (1 - alpha_t)
     should_denoise = torch.rand_like(
-      sampled_x0, dtype=torch.float64) < denoise_prob
+      sampled_x0, dtype=denoise_prob.dtype) < denoise_prob
 
   is_masked = (xt == mask_index)
   should_denoise_mask = is_masked & should_denoise
