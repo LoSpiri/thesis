@@ -2,13 +2,16 @@
 # RunPod Phase 0: flow-vs-masked under spiking + adaptive-threshold experiments.
 #
 # Tuned for RTX PRO 4000 (24 GB, 12 vCPU): batch 16 + 12 sandbox workers.
-# Deploy with the network volume attached at /workspace so results persist.
-# At the end it best-effort stops the pod to release the GPU -- set
-# RUNPOD_API_KEY as a Pod environment variable at deploy time to enable it.
+#
+# NOTE: clone/run this on the CONTAINER disk (e.g. /root/s-flm), not on a
+# network volume at /workspace -- the volume's FS rejects chmod and git fails.
+# At the end, results are copied to /workspace/results/ (the network volume),
+# and the pod is best-effort stopped (set RUNPOD_API_KEY as a Pod env var).
 set -euo pipefail
 
 set -a; source e1/env.runpod; set +a
 mkdir -p e1/results
+PERSIST_DIR="${PERSIST_DIR:-/workspace/results}"
 
 echo "==> installing deps"
 pip install -q hydra-core==1.3.2 omegaconf==2.3.0 lightning==2.5.1 \
@@ -53,8 +56,17 @@ echo "==> (3) adaptive threshold: magnitude-adaptive tau (sphere-arch, K=2, NFE=
 python e1/run_e2_adaptive.py --model sfm --steps 8 --subset 1319 --K 2 \
   --mode magnitude --out e1/results/e2a_magnitude_sfm.json
 
-echo "==> DONE. results in e1/results/ (persisted on the network volume):"
+echo "==> DONE. results in e1/results/ :"
 ls -la e1/results/ || true
+
+# Persist results to the network volume (survives pod stop).
+if [ -d /workspace ] && [ -w /workspace ]; then
+  echo "==> copying results to ${PERSIST_DIR}"
+  mkdir -p "${PERSIST_DIR}" && cp -f e1/results/*.json "${PERSIST_DIR}/" 2>/dev/null || true
+  ls -la "${PERSIST_DIR}" || true
+else
+  echo "==> /workspace not writable; results stay on the container disk."
+fi
 
 # Best-effort stop so the GPU is released (results persist on the volume).
 if [ -n "${RUNPOD_API_KEY:-}" ] && [ -n "${RUNPOD_POD_ID:-}" ]; then
