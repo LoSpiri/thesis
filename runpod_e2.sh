@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # RunPod setup for the E2/E3 follow-up experiments (full 1319, both models).
 #
+# Tuned for RTX PRO 4000 (24 GB, 12 vCPU): batch 16 + 12 sandbox workers
+# (parallel_eval.py). The scripts default to these values.
+#
 # Run from the cloned repo root. Installs deps, downloads checkpoints, then
 # runs: (1) full-scale E2.3, (2) layer-group hybrid, (3) adaptive threshold.
 set -euo pipefail

@@ -6,7 +6,7 @@ Includes a negated group "not_attn_head" = spike everything EXCEPT attention
 and the output head (the proposed hybrid config).
 
 Usage:
-  python run_e2_groups.py --model sfm --subset 1319 --K 2 --out results/x.json
+  python run_e2_groups.py --model sfm --subset 1319 --K 2 --workers 12 --out results/x.json
 """
 import argparse
 import json
@@ -17,9 +17,10 @@ import warnings
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 warnings.filterwarnings("ignore")
 import torch
-import dataloader, sandbox_gsm8k
+import dataloader
 from loader import build
 from spike_inject import SigmaDeltaInjector
+from parallel_eval import score_all
 
 _ATTN = lambda n: ("query" in n or "key" in n or "value" in n
                    or "attn_qkv" in n or "att_out" in n)
@@ -35,14 +36,14 @@ GROUPS = {
 }
 
 
-def acc_with_filter(model, all_ids, dataset, steps, batch, filt, K=2):
+def acc_with_filter(model, all_ids, dataset, steps, batch, filt, K, workers):
     inj = SigmaDeltaInjector(model, mode="sigma_delta", K=K, layer_filter=filt)
     inj.attach()
     torch.manual_seed(0)
     if torch.backends.mps.is_available():
         torch.mps.manual_seed(0)
     n = len(all_ids)
-    correct = total = 0
+    pairs = []
     for start in range(0, n, batch):
         idxs = list(range(start, min(start + batch, n)))
         lens = torch.tensor([len(all_ids[i]) for i in idxs], device=model.device)
@@ -59,14 +60,10 @@ def acc_with_filter(model, all_ids, dataset, steps, batch, filt, K=2):
             pl = int(lens[j])
             resp = model.tokenizer.decode(samples[j, pl:].cpu().tolist(),
                                           skip_special_tokens=True)
-            try:
-                ok = bool(sandbox_gsm8k.evaluate_samples(
-                    resp, dataset[i]["response_ground_truth"], timeout_s=5.0))
-            except Exception:
-                ok = False
-            correct += int(ok); total += 1
+            pairs.append((resp, dataset[i]["response_ground_truth"]))
+    scores = score_all(pairs, workers=workers)
     inj.detach()
-    return correct / max(total, 1), inj.total()
+    return sum(scores) / max(n, 1), inj.total()
 
 
 def main():
@@ -74,9 +71,10 @@ def main():
     p.add_argument("--model", choices=["sfm", "sfm-dit"], default="sfm")
     p.add_argument("--steps", type=int, default=8)
     p.add_argument("--subset", type=int, default=1319)
-    p.add_argument("--batch", type=int, default=8)
+    p.add_argument("--batch", type=int, default=16)
     p.add_argument("--temperature", type=float, default=0.1)
     p.add_argument("--K", type=float, default=2.0)
+    p.add_argument("--workers", type=int, default=12)
     p.add_argument("--out", type=str, default=None)
     args = p.parse_args()
 
@@ -91,7 +89,8 @@ def main():
     print(f"[{args.model}] subset={n} K={args.K}", flush=True)
     print(f"{'group':>14} {'acc':>8} {'spikes':>12}")
     for gname, filt in GROUPS.items():
-        acc, sp = acc_with_filter(model, ids, ds, args.steps, args.batch, filt, K=args.K)
+        acc, sp = acc_with_filter(model, ids, ds, args.steps, args.batch, filt,
+                                  args.K, args.workers)
         results["groups"][gname] = {"acc": acc, "spikes": sp}
         print(f"{gname:>14} {acc:8.4f} {sp:12,}", flush=True)
 

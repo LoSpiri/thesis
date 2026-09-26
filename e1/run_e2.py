@@ -2,10 +2,11 @@
 
 Runs the GSM8K sampler with each nn.Linear input replaced by its spiking
 reconstruction (sigma-delta or stateless), and measures end-to-end accuracy
-plus total spike count. Sweeps quantization resolution K.
+plus total spike count. Sweeps quantization resolution K. Sandbox scoring is
+parallelized across --workers processes.
 
 Usage:
-  python run_e2.py --model sfm --steps 8 --subset 256 --K 1,2,4,8
+  python run_e2.py --model sfm --steps 8 --subset 1319 --K 1,2,4 --workers 12
 """
 import argparse
 import json
@@ -19,9 +20,9 @@ warnings.filterwarnings("ignore")
 import torch
 
 import dataloader
-import sandbox_gsm8k
 from loader import build
 from spike_inject import SigmaDeltaInjector
+from parallel_eval import score_all
 
 
 def pad_prefix_batch(id_lists, device):
@@ -33,21 +34,20 @@ def pad_prefix_batch(id_lists, device):
     return padded, lengths
 
 
-def run_mode(model, injector, all_ids, dataset, mode, K, steps, batch):
+def run_mode(model, injector, all_ids, dataset, mode, K, steps, batch, workers):
     injector.mode = mode
     injector.K = K
     injector.reset()
-    # same initial noise sequence for every mode -> they differ only via injection
     torch.manual_seed(0)
     if torch.backends.mps.is_available():
         torch.mps.manual_seed(0)
     n = len(all_ids)
-    correct = total = 0
+    pairs = []
     for start in range(0, n, batch):
         idxs = list(range(start, min(start + batch, n)))
         b_ids = [all_ids[i] for i in idxs]
         padded, lengths = pad_prefix_batch(b_ids, model.device)
-        injector.reset()  # fresh membrane per batch/generation
+        injector.reset()
         with torch.no_grad():
             samples, _ = model.generate_samples(
                 num_samples=len(idxs), num_steps=steps,
@@ -56,14 +56,10 @@ def run_mode(model, injector, all_ids, dataset, mode, K, steps, batch):
             pl = int(lengths[j])
             resp = model.tokenizer.decode(
                 samples[j, pl:].cpu().tolist(), skip_special_tokens=True)
-            gold = dataset[i]["response_ground_truth"]
-            try:
-                ok = bool(sandbox_gsm8k.evaluate_samples(resp, gold, timeout_s=5.0))
-            except Exception:
-                ok = False
-            correct += int(ok)
-            total += 1
-    return correct / max(total, 1), injector.total()
+            pairs.append((resp, dataset[i]["response_ground_truth"]))
+    scores = score_all(pairs, workers=workers)
+    correct = sum(scores)
+    return correct / max(n, 1), injector.total()
 
 
 def main():
@@ -71,11 +67,12 @@ def main():
     p.add_argument("--model", choices=["sfm", "sfm-dit", "mdlm", "duo", "flm"],
                    required=True)
     p.add_argument("--steps", type=int, default=8)
-    p.add_argument("--subset", type=int, default=256)
-    p.add_argument("--batch", type=int, default=8)
+    p.add_argument("--subset", type=int, default=1319)
+    p.add_argument("--batch", type=int, default=16)
     p.add_argument("--temperature", type=float, default=0.1)
     p.add_argument("--K", type=str, default="1,2,4,8")
     p.add_argument("--topk", type=int, default=None)
+    p.add_argument("--workers", type=int, default=12)
     p.add_argument("--out", type=str, required=True)
     args = p.parse_args()
     Ks = [int(x) for x in args.K.split(",")]
@@ -92,18 +89,18 @@ def main():
     results = {"model": args.model, "steps": args.steps, "subset": n,
                "temperature": args.temperature, "runs": []}
 
-    # float baseline (once)
     t0 = time.time()
-    acc, _ = run_mode(model, injector, all_ids, dataset, "float", 1, args.steps, args.batch)
+    acc, _ = run_mode(model, injector, all_ids, dataset, "float", 1,
+                      args.steps, args.batch, args.workers)
     results["float_accuracy"] = acc
     print(f"[{args.model}] float: acc={acc:.4f} ({time.time()-t0:.0f}s)", flush=True)
 
     for K in Ks:
         t0 = time.time()
         acc_sd, sp_sd = run_mode(model, injector, all_ids, dataset,
-                                 "sigma_delta", K, args.steps, args.batch)
+                                 "sigma_delta", K, args.steps, args.batch, args.workers)
         acc_st, sp_st = run_mode(model, injector, all_ids, dataset,
-                                 "stateless", K, args.steps, args.batch)
+                                 "stateless", K, args.steps, args.batch, args.workers)
         results["runs"].append({"K": K,
                                 "sigma_delta_acc": acc_sd, "sigma_delta_spikes": sp_sd,
                                 "stateless_acc": acc_st, "stateless_spikes": sp_st})
