@@ -9,6 +9,7 @@ warnings.filterwarnings("ignore")
 import torch
 import hydra
 from omegaconf import OmegaConf
+from hydra.core.global_hydra import GlobalHydra
 
 OmegaConf.register_new_resolver("cwd", os.getcwd)
 OmegaConf.register_new_resolver("device_count", torch.cuda.device_count)
@@ -126,6 +127,8 @@ def build(name, *, steps, length, device=None, top_k_velocity=None,
     if temperature is not None:
         overrides.append(f"sampler.temperature={temperature}")
 
+    if GlobalHydra.instance().is_initialized():
+        GlobalHydra.instance().clear()
     hydra.initialize(config_path="../configs", version_base=None)
     cfg = hydra.compose(config_name="config", overrides=overrides)
     tokenizer = dataloader.get_tokenizer(cfg)
