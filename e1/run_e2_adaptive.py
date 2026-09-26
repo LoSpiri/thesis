@@ -1,12 +1,13 @@
-"""E2.5 adaptive threshold: per-step tau(t) schedule, self-validating.
+"""E2.5 adaptive threshold: per-step tau(t) schedules, self-validating.
 
-Schedule:  tau(t) = tau_base * a^(1 - 2t/(S-1))
-  a = 1   -> fixed threshold (must reproduce the fixed sigma_delta result)
-  a > 1   -> coarse early, fine late (hypothesis)
-  a < 1   -> fine early, coarse late (direction control)
+Modes:
+  exp       tau(t) = tau_base * a^(1 - 2t/(S-1))   sweep --A (a=1 == fixed)
+  bucket    tau(t) = tau_base * (1 + b*sin(pi t/(S-1)))  sweep --bucket-b (b=0 == fixed)
+  magnitude tau(t) = mean(|a_t|)/K at each step     single run
 
-Sweeps a at fixed K; reports accuracy + spikes. The a=1 row is the validation
-that the schedule machinery is correct and comparable to the fixed baseline.
+The `a=1` (exp) and `b=0` (bucket) rows are validations: they must exactly
+reproduce the fixed sigma_delta result, which makes every other row directly
+comparable to the fixed baseline.
 """
 import argparse
 import json
@@ -34,8 +35,7 @@ def pad_prefix_batch(id_lists, device):
     return padded, lengths
 
 
-def run(injector, model, all_ids, dataset, steps, batch, a, workers):
-    injector.adaptive_a = a
+def run(injector, model, all_ids, dataset, steps, batch, workers):
     injector.reset()
     torch.manual_seed(0)
     if torch.backends.mps.is_available():
@@ -63,16 +63,18 @@ def run(injector, model, all_ids, dataset, steps, batch, a, workers):
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--model", choices=["sfm", "sfm-dit"], required=True)
+    p.add_argument("--mode", choices=["exp", "bucket", "magnitude"],
+                   default="exp")
     p.add_argument("--steps", type=int, default=8)
     p.add_argument("--subset", type=int, default=1319)
     p.add_argument("--batch", type=int, default=16)
     p.add_argument("--temperature", type=float, default=0.1)
     p.add_argument("--K", type=float, default=2.0)
     p.add_argument("--A", type=str, default="0.5,1,2,4")
+    p.add_argument("--bucket-b", type=str, default="0,0.5,1,2")
     p.add_argument("--workers", type=int, default=12)
     p.add_argument("--out", type=str, required=True)
     args = p.parse_args()
-    As = [float(x) for x in args.A.split(",")]
 
     model, tokenizer, cfg = build(args.model, steps=args.steps, length=512,
                                   temperature=args.temperature,
@@ -82,24 +84,44 @@ def main():
     all_ids = [torch.tensor(dataset[i]["input_ids"]) for i in range(n)]
 
     injector = SigmaDeltaInjector(model, mode="sigma_delta", K=args.K,
-                                  steps=args.steps, adaptive_a=1.0).attach()
+                                  steps=args.steps, tau_mode=args.mode).attach()
 
     t0 = time.time()
     injector.mode = "float"
-    acc_f, _ = run(injector, model, all_ids, dataset, args.steps, args.batch, 1.0, args.workers)
+    acc_f, _ = run(injector, model, all_ids, dataset, args.steps, args.batch, args.workers)
     print(f"[{args.model}] float: acc={acc_f:.4f} ({time.time()-t0:.0f}s)", flush=True)
 
     results = {"model": args.model, "steps": args.steps, "subset": n,
-               "K": args.K, "temperature": args.temperature,
-               "float_accuracy": acc_f, "adaptive": []}
+               "K": args.K, "mode": args.mode, "temperature": args.temperature,
+               "float_accuracy": acc_f, "variants": []}
     injector.mode = "sigma_delta"
-    for a in As:
+
+    if args.mode == "magnitude":
+        variants = [("magnitude", None)]
+    elif args.mode == "bucket":
+        variants = [("bucket", float(x)) for x in args.bucket_b.split(",")]
+    else:
+        variants = [("exp", float(x)) for x in args.A.split(",")]
+
+    for label, val in variants:
+        if label == "exp":
+            injector.adaptive_a = val
+            tag = f"a={val}"
+            is_val = (val == 1.0)
+        elif label == "bucket":
+            injector.bucket_b = val
+            tag = f"b={val}"
+            is_val = (val == 0.0)
+        else:
+            tag = "magnitude"
+            is_val = False
         t0 = time.time()
-        acc, sp = run(injector, model, all_ids, dataset, args.steps, args.batch, a, args.workers)
-        results["adaptive"].append({"a": a, "acc": acc, "spikes": sp})
-        tag = " (validation: a=1)" if a == 1.0 else ""
-        print(f"[{args.model}] a={a}: acc={acc:.4f} spikes={sp} "
-              f"({time.time()-t0:.0f}s){tag}", flush=True)
+        acc, sp = run(injector, model, all_ids, dataset, args.steps, args.batch, args.workers)
+        results["variants"].append({"label": tag, "value": val,
+                                    "acc": acc, "spikes": sp})
+        vtag = " (validation)" if is_val else ""
+        print(f"[{args.model}] {tag}: acc={acc:.4f} spikes={sp} "
+              f"({time.time()-t0:.0f}s){vtag}", flush=True)
 
     injector.detach()
     os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
