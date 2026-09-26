@@ -9,6 +9,7 @@
 set -euo pipefail
 
 set -a; source e1/env.runpod; set +a
+mkdir -p e1/results
 
 echo "==> installing deps"
 pip install -q hydra-core==1.3.2 omegaconf==2.3.0 lightning==2.5.1 \

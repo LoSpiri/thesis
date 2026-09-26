@@ -102,6 +102,7 @@ def main():
               f"({time.time()-t0:.0f}s){tag}", flush=True)
 
     injector.detach()
+    os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
     with open(args.out, "w") as f:
         json.dump(results, f, indent=2)
     print(f"saved {args.out}")
