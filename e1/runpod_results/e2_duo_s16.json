@@ -1,0 +1,30 @@
+{
+  "model": "duo",
+  "steps": 16,
+  "subset": 1319,
+  "temperature": 0.1,
+  "runs": [
+    {
+      "K": 1,
+      "sigma_delta_acc": 0.1956027293404094,
+      "sigma_delta_spikes": 2636856576,
+      "stateless_acc": 0.22517058377558757,
+      "stateless_spikes": 4046639872
+    },
+    {
+      "K": 2,
+      "sigma_delta_acc": 0.23654283548142532,
+      "sigma_delta_spikes": 3299003648,
+      "stateless_acc": 0.22896133434420016,
+      "stateless_spikes": 8428139008
+    },
+    {
+      "K": 4,
+      "sigma_delta_acc": 0.2403335860500379,
+      "sigma_delta_spikes": 4602099200,
+      "stateless_acc": 0.22820318423047764,
+      "stateless_spikes": 16526917632
+    }
+  ],
+  "float_accuracy": 0.24260803639120546
+}

@@ -1,0 +1,17 @@
+{
+  "model": "sfm",
+  "steps": 8,
+  "subset": 1319,
+  "K": 2.0,
+  "mode": "magnitude",
+  "temperature": 0.1,
+  "float_accuracy": 0.12130401819560273,
+  "variants": [
+    {
+      "label": "magnitude",
+      "value": null,
+      "acc": 0.1243366186504928,
+      "spikes": 2293464320
+    }
+  ]
+}

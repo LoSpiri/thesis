@@ -1,0 +1,30 @@
+{
+  "model": "mdlm",
+  "steps": 16,
+  "subset": 1319,
+  "temperature": 0.1,
+  "runs": [
+    {
+      "K": 1,
+      "sigma_delta_acc": 0.09173616376042457,
+      "sigma_delta_spikes": 2795976192,
+      "stateless_acc": 0.11372251705837756,
+      "stateless_spikes": 4775837696
+    },
+    {
+      "K": 2,
+      "sigma_delta_acc": 0.12661106899166036,
+      "sigma_delta_spikes": 3506815232,
+      "stateless_acc": 0.12509476876421532,
+      "stateless_spikes": 9556826112
+    },
+    {
+      "K": 4,
+      "sigma_delta_acc": 0.13646702047005307,
+      "sigma_delta_spikes": 4975715328,
+      "stateless_acc": 0.13570887035633056,
+      "stateless_spikes": 19152670720
+    }
+  ],
+  "float_accuracy": 0.1372251705837756
+}

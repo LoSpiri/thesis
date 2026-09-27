@@ -1,0 +1,30 @@
+{
+  "model": "sfm",
+  "steps": 32,
+  "subset": 1319,
+  "temperature": 0.1,
+  "runs": [
+    {
+      "K": 1,
+      "sigma_delta_acc": 0.1197877179681577,
+      "sigma_delta_spikes": 5616331776,
+      "stateless_acc": 0.10917361637604246,
+      "stateless_spikes": 10049871872
+    },
+    {
+      "K": 2,
+      "sigma_delta_acc": 0.1417740712661107,
+      "sigma_delta_spikes": 6427999744,
+      "stateless_acc": 0.14556482183472327,
+      "stateless_spikes": 20770107392
+    },
+    {
+      "K": 4,
+      "sigma_delta_acc": 0.16148597422289612,
+      "sigma_delta_spikes": 7735953920,
+      "stateless_acc": 0.15693707354056102,
+      "stateless_spikes": 41813700608
+    }
+  ],
+  "float_accuracy": 0.1516300227445034
+}

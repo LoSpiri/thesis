@@ -4,9 +4,10 @@ _Generated on the Mac (MPS) + RunPod (CUDA). Companion to `REPORT-runpod.md` (E1
 
 ## TL;DR
 
-- **Level 2 is proven (full 1319).** A soft-reset LIF neuron *is* a first-order sigma-delta modulator (verified numerically, diff = 0.0). Running a flow sampler with this spiking reconstruction in the loop **matches float accuracy at K=2 for both backbones**, while stateless per-step quantization needs K=4 — i.e. **~2.8–4.4× more spikes for the same accuracy**.
-- **Fixed threshold wins.** The adaptive τ(t) schedule is a clean negative result (early-step precision matters).
-- **Hybrid found.** Spiking the **MLP** only (attention + output head float) keeps accuracy at **~half the spikes** of spiking all linears.
+- **Level 2 is proven (full 1319).** A soft-reset LIF neuron *is* a first-order sigma-delta modulator (verified numerically, diff = 0.0). Running a flow sampler with this spiking reconstruction in the loop **matches float accuracy at K=2**, using **~2–4× fewer spikes** than stateless per-step quantization.
+- **Flow vs masked (Phase 0).** Sigma-delta is ~2–3× more spike-efficient than stateless on *every* model. Flow retains the most accuracy under spiking **at NFE=16** (~100% vs masked 92–97.5%) — but the effect is not decisive (it reverses at NFE=32). So "flow is best for spiking" is *partially* supported, not proven.
+- **Adaptive threshold.** "Coarse-early" failed; a **bucket** schedule (fine at the ends, coarse in the middle) gives ~5% fewer spikes at no accuracy loss. Magnitude-adaptive ≈ fixed.
+- **Hybrid.** Spiking the **MLP** only (attention + output head float) keeps accuracy at **~half the spikes** of spiking all linears.
 - **Level 3 is supported.** The MDLM sampler *is* a rate-driven jump process (token jumps = spikes, rate = (α_s−α_t)/(1−α_t)), and stochastic velocity (a categorical "spike" per position) samples the correct marginal.
 
 ---
@@ -138,15 +139,51 @@ Spike one group at a time (sigma-delta, K=2, s=8, full 1319).
 - The **hybrid `not_attn_head`** (spike MLP + time; keep attention + head float) is at/above float on both models, using **~half the spikes of spiking all linears** (1.24B vs 2.34B on sphere-arch; 1.84B vs 2.16B on sphere-DiT).
 - So the practical design is: **spike the MLP, keep attention and the output head in float** — same accuracy, roughly half the spiking.
 
+## Phase 0 — flow vs masked under spiking (full 1319)
+
+Same sigma-delta injector applied to the masked/uniform diffusion models (MDLM, Duo) as to the flow models, at NFE 16 and 32. `sd`/`st` = sigma-delta / stateless at K=2; retention = acc ÷ float.
+
+| model | NFE | float | sd K=2 (spikes) | st K=2 (spikes) | sd ret. | st ret. |
+|---|---|---|---|---|---|---|
+| sfm (flow) | 16 | 0.1425 | 0.1418 (3.72B) | 0.1289 (10.4B) | **99.5%** | 90.5% |
+| sfm-dit (flow) | 16 | 0.1471 | 0.1501 (3.88B) | 0.1395 (8.7B) | **102%** | 94.8% |
+| mdlm (masked) | 16 | 0.1372 | 0.1266 (3.51B) | 0.1251 (9.6B) | 92.3% | 91.2% |
+| duo (uniform) | 16 | 0.2426 | 0.2365 (3.30B) | 0.2290 (8.4B) | 97.5% | 94.4% |
+| sfm (flow) | 32 | 0.1516 | 0.1418 (6.43B) | 0.1456 (20.8B) | 93.6% | 96.0% |
+| sfm-dit (flow) | 32 | 0.1759 | 0.1554 (6.79B) | 0.1486 (17.4B) | 88.4% | 84.5% |
+| mdlm (masked) | 32 | 0.2343 | 0.2252 (6.10B) | 0.2305 (19.3B) | 96.1% | 98.4% |
+| duo (uniform) | 32 | 0.2964 | 0.3002 (5.90B) | 0.2820 (17.1B) | **101%** | 95.2% |
+
+**Read-out:**
+- **robust result:** sigma-delta @ K=2 uses **~2–3× fewer spikes** than stateless @ K=2, at comparable-or-higher accuracy, on *every* model.
+- **flow advantage (mixed):** at **matched NFE=16**, flow retains ~100% (99.5% / 102%) while masked retains 92–97.5%; and the sigma-delta benefit *over* stateless is larger for flow (+7–9%) than masked (+1–3%). This is the "flow is better matched to sigma-delta spiking" signal.
+- **but not clean:** at NFE=32 the picture flips — flow retention drops (88–94%), masked stays high (96–101%). So the advantage is **not decisive**; it appears at NFE=16, not at NFE=32. Likely because at higher NFE *all* models take smaller, smoother steps, so the flow's smoothness edge shrinks.
+
+## Adaptive threshold — retry
+
+**Bucket** (fine at t=0 and t=S−1, coarser in the middle) — sphere-arch, K=2, NFE=8, full 1319:
+
+| b | acc | spikes |
+|---|---|---|
+| **0 (validation)** | 0.1228 | 2.343B |
+| 0.5 | 0.1289 | 2.240B |
+| 1.0 | 0.1289 | 2.212B |
+| 2.0 | 0.1107 | 2.188B |
+
+**Magnitude-adaptive τ**: 0.1243 @ 2.293B (≈ fixed).
+
+**Read-out:** the original "coarse-early" schedule failed because it coarsened the *initialization* (step 0). Protecting the ends (bucket) fixes it: **b=0.5–1.0 gives ~5% fewer spikes with no accuracy loss** (the +0.6% is within noise, but the spike drop is real). b=2 over-coarsens and hurts. Magnitude-adaptive is ≈ fixed (activation scale is stable, so there's little to adapt to). So the adaptive idea is **salvageable, but only a modest win**.
+
 ## What this means (updated)
 
-1. **Level 2 proven at full scale**: sigma-delta spiking matches the float flow model at K=2 for *both* backbones, with stateless needing ~3–4× more spikes for the same accuracy.
-2. **Fixed threshold wins**: the adaptive τ(t) schedule is refuted (clean negative result, validated).
-3. **Hybrid identified**: spike the MLP only; keep attention + head float → ~half the spikes, no accuracy loss.
-4. **Still missing**: the flow-vs-masked head-to-head (spike MDLM/Duo with the same injector). The current results prove "a flow model can be spiked losslessly," not yet "flow is *best* at spiking."
+1. **Level 2 (mechanism)**: sigma-delta spiking matches/beats the float model at K=2 with ~2–4× fewer spikes than stateless — for *all* models.
+2. **Flow-vs-masked**: the "flow is best for spiking" claim is **partially supported** — flow retains more accuracy and benefits more from sigma-delta at NFE=16, but the effect is not decisive (it reverses at NFE=32). The defensible claim is *"sigma-delta spiking is very spike-efficient, and flow shows the largest benefit at matched NFE"*, not yet *"flow is unambiguously best."*
+3. **Adaptive threshold**: the bucket schedule is a modest win (~5% spikes, no loss); magnitude ≈ fixed.
+4. **Hybrid**: spike MLP, keep attention+head float → ~half the spikes, no loss.
+5. **Still open**: whether flow wins decisively needs a cleaner control (matched *accuracy* rather than matched NFE, and/or lower T where masked clips tokens more abruptly).
 
 ## Next batch
 
-- **Head-to-head**: run `run_e2.py --model mdlm` and `--model duo` (same injector) → the decisive "flow is best for spiking" comparison.
-- `not_attn_head` hybrid as the default config for any QAT/conversion experiment.
-- QAT / ANN→SNN conversion with the sigma-delta layer → the "real" trained SNN (phase 2).
+- **QAT / spike-aware fine-tune** with the sigma-delta layer (MLP-only hybrid) → does training beat conversion at coarse K?
+- Cleaner flow-vs-masked control at matched accuracy / lower temperature (to widen the smoothness gap).
+- Scale to OpenWebText Gen-PPL for language generality.
