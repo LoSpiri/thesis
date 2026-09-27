@@ -83,9 +83,20 @@ controls the membrane activity, as expected.
 # local (Apple MPS), small subsets
 SUBSET=64 bash e1/run_e4_local.sh          # or MODEL=sfm-dit
 
-# RunPod, full 1319 (container disk; results -> /workspace/results)
-bash runpod_e4.sh
+# RunPod, full 1319 (container disk; results written straight to /workspace/results)
+bash runpod_e4.sh                 # sweeps K=2
+K_LIST="1 2" bash runpod_e4.sh    # re-enable the coarse K=1 rows
 ```
+
+`runpod_e4.sh` writes each result JSON directly to the network volume
+(`/workspace/results`, override with `PERSIST_DIR`) so sections survive a spot
+preemption, and best-effort stops the pod at the end (needs `RUNPOD_API_KEY`
+and `RUNPOD_POD_ID`).
+
+**Caveat on the default K=2.** Sigma-delta already matches float at K=2
+(E2.3), so the levers may hit a ceiling there — the coarse K=1 regime is where
+spiking hurts and the restorations should show the most headroom. `K_LIST="1 2"`
+restores those rows (~1/3 more GPU time).
 
 Results land in `e1/results/e4_*.json` (local) / `e1/results/` on the pod.
 

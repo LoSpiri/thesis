@@ -2,7 +2,7 @@
 # RunPod driver for the E4 "high-frequency information" experiments (full 1319).
 #
 # Motivated by "Spiking Neural Networks Need High-Frequency Information"
-# (Fang et al., 2024). Four training-free levers on the S-FLM flow + sigma-delta
+# (Fang et al., 2024). Training-free levers on the S-FLM flow + sigma-delta
 # spiking forward pass:
 #   E4.0 spectrum     -- is the sigma-delta LIF low-passing the flow? (diagnostic)
 #   E4.1 membrane     -- continuous bypass of the quantizer (membrane shortcut)
@@ -14,13 +14,28 @@
 # Tuned for RTX PRO 4000 (24 GB, 12 vCPU): batch 16 + 12 sandbox workers.
 #
 # NOTE: run on the CONTAINER disk (e.g. /root/s-flm), not the network volume
-# (its FS rejects chmod and git fails). Results are copied to /workspace/results
-# at the end; the pod is best-effort stopped (set RUNPOD_API_KEY as a Pod env).
+# (its FS rejects chmod and git fails). Results are written DIRECTLY to the
+# network volume (/workspace/results) so each section survives a spot
+# preemption; if the volume is not writable it falls back to e1/results.
+# The pod is best-effort stopped at the end (set RUNPOD_API_KEY as a Pod env).
+#
+# K_LIST selects the quantization resolutions swept (default "2"; set
+# K_LIST="1 2" to re-enable the coarse K=1 rows).
 set -euo pipefail
 
 set -a; source e1/env.runpod; set +a
-mkdir -p e1/results
+
 PERSIST_DIR="${PERSIST_DIR:-/workspace/results}"
+if mkdir -p "$PERSIST_DIR" 2>/dev/null && touch "$PERSIST_DIR/.wtest" 2>/dev/null; then
+  rm -f "$PERSIST_DIR/.wtest"
+  OUT_DIR="$PERSIST_DIR"
+else
+  echo "==> ${PERSIST_DIR} not writable; falling back to e1/results (container disk)"
+  OUT_DIR="e1/results"
+fi
+mkdir -p "$OUT_DIR"
+K_LIST="${K_LIST:-2}"
+echo "==> outputs -> ${OUT_DIR}; K_LIST='${K_LIST}'"
 
 echo "==> installing deps"
 pip install -q hydra-core==1.3.2 omegaconf==2.3.0 lightning==2.5.1 \
@@ -49,24 +64,24 @@ echo "==> (E4.0) frequency spectrum diagnostic (small subset; cheap)"
 for M in sfm sfm-dit; do
   python e1/run_e4_spectrum.py --model "$M" --steps 8 --K 2 --length 512 \
     --subset 16 --batch 8 --blocks 0,-1 \
-    --out "e1/results/e4_spectrum_${M}.json"
+    --out "${OUT_DIR}/e4_spectrum_${M}.json"
 done
 
-echo "==> (E4.1) membrane shortcut: lambda sweep, K in {1,2}, full 1319"
+echo "==> (E4.1) membrane shortcut: lambda sweep, K in {${K_LIST}}, full 1319"
 for M in sfm sfm-dit; do
-  for KK in 1 2; do
+  for KK in $K_LIST; do
     python e1/run_e4_membrane.py --model "$M" --steps 8 --subset 1319 \
       --K "$KK" --bypass 0,0.25,0.5,0.75,1 --workers 12 \
-      --out "e1/results/e4_membrane_${M}_K${KK}.json"
+      --out "${OUT_DIR}/e4_membrane_${M}_K${KK}.json"
   done
 done
 
-echo "==> (E4.2) WTA / top-k velocity, K in {1,2}, full 1319"
+echo "==> (E4.2) WTA / top-k velocity, K in {${K_LIST}}, full 1319"
 for M in sfm sfm-dit; do
-  for KK in 1 2; do
+  for KK in $K_LIST; do
     python e1/run_e4_wta.py --model "$M" --steps 8 --subset 1319 \
       --K "$KK" --topks=-1,1,2,4 --modes float,sigma_delta --workers 12 \
-      --out "e1/results/e4_wta_${M}_K${KK}.json"
+      --out "${OUT_DIR}/e4_wta_${M}_K${KK}.json"
   done
 done
 
@@ -74,34 +89,23 @@ echo "==> (E4.3) max-style early token mixer, K=2, full 1319"
 for M in sfm sfm-dit; do
   python e1/run_e4_mixer.py --model "$M" --steps 8 --subset 1319 \
     --K 2 --blocks 2 --mode center --betas 0,0.25,0.5,1 --workers 12 \
-    --out "e1/results/e4_mixer_center_${M}_K2.json"
+    --out "${OUT_DIR}/e4_mixer_center_${M}_K2.json"
 done
 python e1/run_e4_mixer.py --model sfm --steps 8 --subset 1319 \
   --K 2 --blocks 2 --mode diff --betas 0,0.25,0.5,1 --workers 12 \
-  --out "e1/results/e4_mixer_diff_sfm_K2.json"
+  --out "${OUT_DIR}/e4_mixer_diff_sfm_K2.json"
 
-echo "==> (E4.4) frequency-selective bypass, K=2 (both models), full 1319"
+echo "==> (E4.4) frequency-selective bypass, K in {${K_LIST}}, full 1319"
 for M in sfm sfm-dit; do
-  python e1/run_e4_freqbypass.py --model "$M" --steps 8 --subset 1319 \
-    --K 2 --alpha 0.5,0.8 --gamma 0,0.5,1,1.5,2 --workers 12 \
-    --out "e1/results/e4_freqbypass_${M}_K2.json"
+  for KK in $K_LIST; do
+    python e1/run_e4_freqbypass.py --model "$M" --steps 8 --subset 1319 \
+      --K "$KK" --alpha 0.5,0.8 --gamma 0,0.5,1,1.5,2 --workers 12 \
+      --out "${OUT_DIR}/e4_freqbypass_${M}_K${KK}.json"
+  done
 done
-echo "==> (E4.4) frequency-selective bypass, K=1 (sfm), full 1319"
-python e1/run_e4_freqbypass.py --model sfm --steps 8 --subset 1319 \
-  --K 1 --alpha 0.5,0.8 --gamma 0,1 --workers 12 \
-  --out "e1/results/e4_freqbypass_sfm_K1.json"
 
-echo "==> DONE. results in e1/results/ :"
-ls -la e1/results/ || true
-
-# Persist results to the network volume (survives pod stop).
-if [ -d /workspace ] && [ -w /workspace ]; then
-  echo "==> copying results to ${PERSIST_DIR}"
-  mkdir -p "${PERSIST_DIR}" && cp -f e1/results/*.json "${PERSIST_DIR}/" 2>/dev/null || true
-  ls -la "${PERSIST_DIR}" || true
-else
-  echo "==> /workspace not writable; results stay on the container disk."
-fi
+echo "==> DONE. results in ${OUT_DIR} :"
+ls -la "${OUT_DIR}" || true
 
 # Best-effort stop so the GPU is released (results persist on the volume).
 if [ -n "${RUNPOD_API_KEY:-}" ] && [ -n "${RUNPOD_POD_ID:-}" ]; then
